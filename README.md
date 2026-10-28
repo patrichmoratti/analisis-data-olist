@@ -60,4 +60,4 @@ Dashboard akan terbuka di browser pada alamat `http://localhost:8501`.
 
 ## Tautan Dashboard
 
-Tautan Streamlit Community Cloud: belum tersedia (akan diisi setelah deploy, lihat `url.txt`).
+Tautan Streamlit Community Cloud: (https://olist-patrich.streamlit.app)

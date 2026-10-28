@@ -1,1 +1,1 @@
-TODO: ganti dengan tautan Streamlit Community Cloud setelah deploy
+https://olist-patrich.streamlit.app
