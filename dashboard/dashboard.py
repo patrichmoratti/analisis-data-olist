@@ -1,14 +1,3 @@
-"""
-Dashboard Analisis E-Commerce (Olist).
-
-Dashboard ini adalah kelanjutan dari notebook.ipynb. Semua angka dihitung dari
-dashboard/main_data.csv dengan definisi yang sama seperti di notebook:
-- pendapatan = jumlah price pada level item
-- pesanan terlambat = delay_days > 0 (kolom is_late)
-- skor rendah = review_score 1 atau 2
-- segmen RFM sudah tersedia di kolom segment (dihitung dari seluruh periode)
-"""
-
 import html
 import json
 import urllib.error
@@ -29,14 +18,19 @@ FILE_PETA = FOLDER / "brasil_negara_bagian.geojson"
 # URL yang sama dengan variabel url_peta di notebook
 URL_PETA = "https://raw.githubusercontent.com/codeforamerica/click_that_hood/master/public/data/brazil-states.geojson"
 
+KOLOM_DATA = ["order_id", "customer_unique_id", "order_purchase_timestamp", "price",
+              "product_category_name_english", "customer_state", "is_late", "delay_status",
+              "review_score", "segment"]
 URUTAN_KELOMPOK = ["Tepat waktu", "Terlambat 1-3 hari", "Terlambat 4-7 hari", "Terlambat > 7 hari"]
 URUTAN_SEGMEN = ["Aktif Bernilai Tinggi", "Pasif Bernilai Tinggi", "Aktif Bernilai Rendah", "Pasif Bernilai Rendah"]
 MIN_PESANAN = 100  # minimal pesanan per negara bagian agar ikut diperingkat (sama dengan Q3)
+BATAS_WARNA_PETA = 22  # skala warna peta 0 sampai 22 persen (sama dengan peta di notebook)
 PESAN_KOSONG = "Tidak ada data untuk kombinasi filter ini."
 
 BULAN_PENDEK = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
 BULAN_PANJANG = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli",
                  "Agustus", "September", "Oktober", "November", "Desember"]
+ANGKA_KATA = {1: "Satu", 2: "Dua", 3: "Tiga", 4: "Empat", 5: "Lima"}
 
 FONT = "DM Sans, system-ui, sans-serif"
 KONFIG_GRAFIK = {"displayModeBar": False, "scrollZoom": False}
@@ -46,13 +40,9 @@ WARNA = {
     "latar": "#F4F6FB", "kartu": "#FFFFFF", "teks": "#1B1F2A", "redup": "#566070",
     "garis": "#E3E7EF", "biru": "#1565C0", "ungu": "#6A1B9A", "takarir": "#EAF2FD",
     "biru_redup": "#A9C5EC", "ungu_gradasi": ["#B58AD0", "#8E44B5", "#6A1B9A"],
-    "tepi_peta": "#8A94A6",
+    "tepi_peta": "#8A94A6", "tanpa_data": "#E9ECF2",
 }
 
-
-# ---------------------------------------------------------------------------
-# Fungsi format angka (gaya Indonesia: titik untuk ribuan, koma untuk desimal)
-# ---------------------------------------------------------------------------
 def format_angka(nilai, desimal=0):
     teks = f"{nilai:,.{desimal}f}"
     return teks.replace(",", "#").replace(".", ",").replace("#", ".")
@@ -80,6 +70,13 @@ def label_bulan(kode, panjang=False):
     tahun, bulan = kode.split("-")
     nama = BULAN_PANJANG if panjang else BULAN_PENDEK
     return f"{nama[int(bulan) - 1]} {tahun}"
+
+
+def gabung_daftar(daftar):
+    """['AL', 'MA', 'SE'] -> 'AL, MA, dan SE'."""
+    if len(daftar) <= 1:
+        return "".join(daftar)
+    return ", ".join(daftar[:-1]) + f", dan {daftar[-1]}"
 
 
 def format_tick(nilai):
@@ -113,25 +110,24 @@ def warna_transparan(kode_hex, alfa):
 # ---------------------------------------------------------------------------
 # Memuat data
 # ---------------------------------------------------------------------------
-@st.cache_data(show_spinner="Memuat data...")
-def muat_data():
-    """Membaca main_data.csv sekali dan hanya mengambil kolom yang dipakai dashboard."""
-    kolom = ["order_id", "customer_unique_id", "order_purchase_timestamp", "price",
-             "product_category_name_english", "customer_state", "is_late", "delay_status",
-             "review_score", "segment"]
-    df = pd.read_csv(FILE_DATA, usecols=kolom)
-
-    # bulan pembelian dalam format "YYYY-MM", contoh "2017-11"
-    df["bulan"] = df["order_purchase_timestamp"].str[:7]
+def siapkan_data(df):
+    """Menambah kolom bulan dan nama kategori, lalu mengubah tipe data agar hemat memori."""
+    df = df.copy()
+    df["bulan"] = df["order_purchase_timestamp"].str[:7]  # contoh: "2017-11"
     # nama kategori Title Case tanpa underscore, sama seperti grafik di notebook
     df["kategori"] = df["product_category_name_english"].str.replace("_", " ").str.title()
     df = df.drop(columns=["order_purchase_timestamp", "product_category_name_english"])
-
-    for kolom_teks in ["customer_state", "kategori", "delay_status", "segment"]:
-        df[kolom_teks] = df[kolom_teks].astype("category")
+    for kolom in ["customer_state", "kategori", "delay_status", "segment"]:
+        df[kolom] = df[kolom].astype("category")
     df["is_late"] = df["is_late"].astype("int8")
     df["review_score"] = df["review_score"].astype("float32")
     return df
+
+
+@st.cache_data(show_spinner="Memuat data...")
+def muat_data():
+    """Membaca main_data.csv sekali dan hanya mengambil kolom yang dipakai dashboard."""
+    return siapkan_data(pd.read_csv(FILE_DATA, usecols=KOLOM_DATA))
 
 
 @st.cache_data(show_spinner="Memuat peta...")
@@ -153,29 +149,25 @@ def nama_negara_bagian(peta):
     return {f["properties"]["sigla"]: f["properties"]["name"] for f in peta["features"]}
 
 
-@st.cache_data
-def daftar_bulan():
-    return sorted(muat_data()["bulan"].unique())
+def daftar_bulan(df):
+    return sorted(df["bulan"].unique())
 
 
-@st.cache_data
-def kategori_teratas():
+def kategori_teratas(df):
     """10 kategori dengan pendapatan terbesar pada seluruh data (sama dengan Q1)."""
-    pendapatan = muat_data().groupby("kategori", observed=True)["price"].sum()
+    pendapatan = df.groupby("kategori", observed=True)["price"].sum()
     return pendapatan.sort_values(ascending=False).head(10).index.tolist()
 
 
-# ---------------------------------------------------------------------------
-# Filter dan perhitungan
-# ---------------------------------------------------------------------------
-def terapkan_filter(df, dari, sampai, negara="Semua", kategori="Semua"):
+def terapkan_filter(df, dari, sampai, kategori="Semua", segmen="Semua"):
+    """Satu-satunya tempat filter diterapkan. df harus berisi seluruh data."""
     hasil = df[(df["bulan"] >= dari) & (df["bulan"] <= sampai)]
-    if negara != "Semua":
-        hasil = hasil[hasil["customer_state"] == negara]
     if kategori == "Lainnya":
-        hasil = hasil[~hasil["kategori"].isin(kategori_teratas())]
+        hasil = hasil[~hasil["kategori"].isin(kategori_teratas(df))]
     elif kategori != "Semua":
         hasil = hasil[hasil["kategori"] == kategori]
+    if segmen != "Semua":
+        hasil = hasil[hasil["segment"] == segmen]
     return hasil
 
 
@@ -184,19 +176,16 @@ def ke_level_pesanan(df):
     return df.drop_duplicates(subset="order_id")
 
 
-@st.cache_data
-def hitung_kpi(dari, sampai, negara, kategori):
-    item_df = terapkan_filter(muat_data(), dari, sampai, negara)
-    pesanan_df = ke_level_pesanan(item_df)
+def hitung_kpi(df):
+    pesanan_df = ke_level_pesanan(df)
     ulasan = pesanan_df["review_score"].dropna()
     jumlah_pesanan = len(pesanan_df)
     ada_pesanan = jumlah_pesanan > 0
-
+    pendapatan = df["price"].sum()
     return {
-        # kategori hanya memengaruhi pendapatan
-        "pendapatan": terapkan_filter(muat_data(), dari, sampai, negara, kategori)["price"].sum(),
+        "pendapatan": pendapatan,
         "jumlah_pesanan": jumlah_pesanan,
-        "nilai_rata": item_df["price"].sum() / jumlah_pesanan if ada_pesanan else None,
+        "nilai_rata": pendapatan / jumlah_pesanan if ada_pesanan else None,
         "jumlah_terlambat": int(pesanan_df["is_late"].sum()),
         "persen_terlambat": pesanan_df["is_late"].mean() * 100 if ada_pesanan else None,
         "jumlah_ulasan": len(ulasan),
@@ -205,30 +194,30 @@ def hitung_kpi(dari, sampai, negara, kategori):
     }
 
 
-@st.cache_data
-def hitung_tren(dari, sampai, negara, kategori):
-    """Pendapatan per bulan. Bulan tanpa penjualan tetap muncul dengan nilai 0."""
-    item_df = terapkan_filter(muat_data(), dari, sampai, negara, kategori)
-    semua_bulan = [b for b in daftar_bulan() if dari <= b <= sampai]
-    tren = item_df.groupby("bulan")["price"].sum().reindex(semua_bulan, fill_value=0)
+def hitung_tren(df, dari, sampai):
+    """Pendapatan per bulan dalam rentang terpilih. Bulan tanpa penjualan bernilai 0."""
+    semua_bulan = pd.period_range(dari, sampai, freq="M").strftime("%Y-%m").tolist()
+    tren = df.groupby("bulan")["price"].sum().reindex(semua_bulan, fill_value=0)
     return pd.DataFrame({"bulan": tren.index, "pendapatan": tren.values})
 
 
-@st.cache_data
-def hitung_kategori(dari, sampai, negara):
-    item_df = terapkan_filter(muat_data(), dari, sampai, negara)
-    kategori_df = (item_df.groupby("kategori", observed=True)["price"].sum()
+def hitung_kategori(df, total_pembanding):
+    """10 kategori teratas pada data terfilter.
+
+    Persentase dihitung terhadap total_pembanding, yaitu pendapatan pada filter periode
+    dan segmen tanpa filter kategori, agar kategori yang dipilih tidak selalu 100%.
+    """
+    kategori_df = (df.groupby("kategori", observed=True)["price"].sum()
                    .sort_values(ascending=False).reset_index())
     kategori_df.columns = ["kategori", "pendapatan"]
     kategori_df["kategori"] = kategori_df["kategori"].astype(str)
-    kategori_df["persen"] = kategori_df["pendapatan"] / kategori_df["pendapatan"].sum() * 100
+    kategori_df["persen"] = kategori_df["pendapatan"] / total_pembanding * 100 if total_pembanding else 0
     return kategori_df
 
 
-@st.cache_data
-def hitung_keterlambatan_negara(dari, sampai):
-    """Persen terlambat per negara bagian (mengikuti periode, tidak mengikuti filter negara bagian)."""
-    pesanan_df = ke_level_pesanan(terapkan_filter(muat_data(), dari, sampai))
+def hitung_peta(df):
+    """Persen pesanan terlambat per negara bagian dan rata-rata nasional dari data terfilter."""
+    pesanan_df = ke_level_pesanan(df)
     negara_df = pesanan_df.groupby("customer_state", observed=True).agg(
         order_count=("order_id", "nunique"), late_count=("is_late", "sum")).reset_index()
     negara_df["customer_state"] = negara_df["customer_state"].astype(str)
@@ -239,38 +228,68 @@ def hitung_keterlambatan_negara(dari, sampai):
     return negara_df, rata_nasional
 
 
-@st.cache_data
-def hitung_skor_ulasan(dari, sampai, negara):
-    pesanan_df = ke_level_pesanan(terapkan_filter(muat_data(), dari, sampai, negara))
-    ulasan_df = pesanan_df.dropna(subset=["review_score"])
+def ambil_top5(negara_df):
+    """5 negara bagian paling terlambat dengan minimal 100 pesanan (sama dengan Q3)."""
+    layak = negara_df[negara_df["order_count"] >= MIN_PESANAN]
+    return layak.sort_values(by="late_pct", ascending=False).head(5)
+
+
+def hitung_skor(df):
+    """Rata-rata skor ulasan per kelompok keterlambatan dan selisihnya dengan Tepat waktu."""
+    ulasan_df = ke_level_pesanan(df).dropna(subset=["review_score"])
     skor_df = ulasan_df.groupby("delay_status", observed=True)["review_score"].agg(["mean", "count"])
     skor_df.index = skor_df.index.astype(str)
     skor_df = skor_df.reindex(URUTAN_KELOMPOK)
     skor_df.columns = ["skor_rata", "jumlah_ulasan"]
+    skor_df["jumlah_ulasan"] = skor_df["jumlah_ulasan"].fillna(0).astype(int)
 
-    # penurunan skor dibanding pesanan tepat waktu
     skor_tepat_waktu = skor_df.loc["Tepat waktu", "skor_rata"]
     skor_df["turun"] = skor_tepat_waktu - skor_df["skor_rata"]
     skor_df["turun_persen"] = skor_df["turun"] / skor_tepat_waktu * 100
     return skor_df.rename_axis("kelompok").reset_index()
 
 
-@st.cache_data
-def hitung_segmen(negara):
-    """Porsi pelanggan dan pendapatan per segmen RFM dari seluruh periode."""
-    item_df = muat_data()
-    if negara != "Semua":
-        item_df = item_df[item_df["customer_state"] == negara]
-    segmen_df = item_df.groupby("segment", observed=True).agg(
+def hitung_rfm(df, df_pembanding, segmen):
+    """Jumlah pelanggan dan pendapatan per segmen RFM pada data terfilter.
+
+    Persentase dihitung terhadap df_pembanding (filter periode dan kategori tanpa filter
+    segmen), agar segmen yang dipilih tidak selalu 100%.
+    """
+    daftar = URUTAN_SEGMEN if segmen == "Semua" else [segmen]
+    segmen_df = df.groupby("segment", observed=True).agg(
         jumlah_pelanggan=("customer_unique_id", "nunique"), pendapatan=("price", "sum"))
     segmen_df.index = segmen_df.index.astype(str)
-    segmen_df = segmen_df.reindex(URUTAN_SEGMEN, fill_value=0)
+    segmen_df = segmen_df.reindex(daftar, fill_value=0)
 
-    total_pelanggan = segmen_df["jumlah_pelanggan"].sum()
-    total_pendapatan = segmen_df["pendapatan"].sum()
+    total_pelanggan = df_pembanding["customer_unique_id"].nunique()
+    total_pendapatan = df_pembanding["price"].sum()
     segmen_df["persen_pelanggan"] = segmen_df["jumlah_pelanggan"] / total_pelanggan * 100 if total_pelanggan else 0
     segmen_df["persen_pendapatan"] = segmen_df["pendapatan"] / total_pendapatan * 100 if total_pendapatan else 0
     return segmen_df.rename_axis("segmen").reset_index()
+
+
+def hitung_semua(data, dari, sampai, kategori, segmen):
+    """Menghitung semua isi dashboard dari satu himpunan data terfilter."""
+    df = terapkan_filter(data, dari, sampai, kategori, segmen)
+    tanpa_kategori = terapkan_filter(data, dari, sampai, "Semua", segmen)
+    tanpa_segmen = terapkan_filter(data, dari, sampai, kategori, "Semua")
+    negara_df, rata_nasional = hitung_peta(df)
+    return {
+        "kpi": hitung_kpi(df),
+        "tren": hitung_tren(df, dari, sampai),
+        "kategori": hitung_kategori(df, tanpa_kategori["price"].sum()),
+        "negara": negara_df,
+        "rata_nasional": rata_nasional,
+        "top5": ambil_top5(negara_df),
+        "skor": hitung_skor(df),
+        "rfm": hitung_rfm(df, tanpa_segmen, segmen),
+    }
+
+
+@st.cache_data
+def hitung_dashboard(dari, sampai, kategori, segmen):
+    """Versi ber-cache dari hitung_semua untuk dipakai aplikasi."""
+    return hitung_semua(muat_data(), dari, sampai, kategori, segmen)
 
 
 # ---------------------------------------------------------------------------
@@ -333,14 +352,10 @@ def buat_grafik_tren(tren, warna):
     return fig
 
 
-def buat_grafik_kategori(kategori_df, kategori_terpilih, warna):
+def buat_grafik_kategori(kategori_df, warna):
     top10 = kategori_df.head(10)
-    # sorot kategori terpilih, atau tiga teratas bila tidak ada kategori tertentu yang dipilih
-    if kategori_terpilih in top10["kategori"].tolist():
-        disorot = [k == kategori_terpilih for k in top10["kategori"]]
-    else:
-        disorot = [i < 3 for i in range(len(top10))]
-    warna_batang = [warna["biru"] if s else warna["biru_redup"] for s in disorot]
+    # tiga kategori teratas disorot biru pekat, sisanya lebih redup
+    warna_batang = [warna["biru"] if i < 3 else warna["biru_redup"] for i in range(len(top10))]
     teks = [f"{format_rp(p)} ({format_persen(pc, 1)})" for p, pc in zip(top10["pendapatan"], top10["persen"])]
     hover = [["R$ " + format_angka(p, 2), format_persen(pc)] for p, pc in zip(top10["pendapatan"], top10["persen"])]
 
@@ -355,56 +370,52 @@ def buat_grafik_kategori(kategori_df, kategori_terpilih, warna):
     fig.update_layout(margin=dict(l=8, r=24, t=16, b=8), bargap=0.3)
     fig.update_xaxes(tickvals=tick_x, ticktext=label_x, range=[0, top10["pendapatan"].max() * 1.5],
                      title_text="Pendapatan (R$)")
-    fig.update_yaxes(autorange="reversed", showgrid=False, tickfont=dict(color=warna["teks"]))
+    # rentang tetap 10 baris, agar tebal batang sama walau hanya satu kategori yang tampil
+    fig.update_yaxes(range=[9.5, -0.5], showgrid=False, tickfont=dict(color=warna["teks"]))
     return fig
 
 
-def buat_grafik_peta(peta, negara_df, negara_terpilih, nama, warna):
+def buat_grafik_peta(peta, negara_df, nama, warna):
     semua_kode = [f["properties"]["sigla"] for f in peta["features"]]
     data = negara_df[negara_df["customer_state"].isin(semua_kode)]
+    tanpa_data = [k for k in semua_kode if k not in set(data["customer_state"])]
     hover = [[nama.get(k, k), format_persen(p), format_angka(t), format_angka(n),
               "" if n >= MIN_PESANAN else f"<br><i>Kurang dari {MIN_PESANAN} pesanan, tidak diperingkat</i>"]
              for k, p, t, n in zip(data["customer_state"], data["late_pct"], data["late_count"], data["order_count"])]
 
     fig = go.Figure()
-    # lapisan dasar agar semua negara bagian tetap tergambar walau tanpa pesanan
-    fig.add_trace(go.Choropleth(
-        geojson=peta, featureidkey="properties.sigla", locations=semua_kode, z=[0] * len(semua_kode),
-        colorscale=[[0, warna["garis"]], [1, warna["garis"]]], showscale=False,
-        marker=dict(line=dict(color=warna["tepi_peta"], width=0.6)), hoverinfo="skip",
-    ))
+    # negara bagian tanpa pesanan pada filter ini diberi warna abu-abu muda
+    if tanpa_data:
+        fig.add_trace(go.Choropleth(
+            geojson=peta, featureidkey="properties.sigla", locations=tanpa_data, z=[0] * len(tanpa_data),
+            colorscale=[[0, warna["tanpa_data"]], [1, warna["tanpa_data"]]], showscale=False,
+            marker=dict(line=dict(color=warna["tepi_peta"], width=0.6)),
+            customdata=[nama.get(k, k) for k in tanpa_data],
+            hovertemplate="<b>%{location} · %{customdata}</b><br>Tidak ada pesanan<extra></extra>",
+        ))
     fig.add_trace(go.Choropleth(
         geojson=peta, featureidkey="properties.sigla", locations=data["customer_state"], z=data["late_pct"],
-        colorscale="Purples", zmin=0, zmax=max(data["late_pct"].max(), 1),
+        colorscale="Purples", zmin=0, zmax=BATAS_WARNA_PETA,
         marker=dict(line=dict(color=warna["tepi_peta"], width=0.6)), customdata=hover,
         hovertemplate=("<b>%{location} · %{customdata[0]}</b><br>Terlambat: %{customdata[1]}"
                        "<br>%{customdata[2]} dari %{customdata[3]} pesanan%{customdata[4]}<extra></extra>"),
         colorbar=dict(title=dict(text="Terlambat", font=dict(color=warna["redup"], size=12)),
                       ticksuffix="%", tickfont=dict(color=warna["redup"]), thickness=12, len=0.75, outlinewidth=0),
     ))
-    # garis tepi tebal untuk negara bagian terpilih
-    if negara_terpilih != "Semua":
-        fig.add_trace(go.Choropleth(
-            geojson=peta, featureidkey="properties.sigla", locations=[negara_terpilih], z=[1],
-            colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]], showscale=False,
-            marker=dict(line=dict(color=warna["biru"], width=3.5)), hoverinfo="skip",
-        ))
 
     tata_letak_dasar(fig, warna, tinggi=440)
-    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), clickmode="event+select", dragmode=False)
+    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), dragmode=False)
     fig.update_geos(fitbounds="locations", visible=False, bgcolor="rgba(0,0,0,0)", projection_type="mercator")
     return fig
 
 
-def buat_grafik_top5(top5, rata_nasional, negara_terpilih, nama, warna):
+def buat_grafik_top5(top5, rata_nasional, nama, warna):
     label_y = [f"{k} · {nama.get(k, k)}" for k in top5["customer_state"]]
-    tepi = [3 if k == negara_terpilih else 0 for k in top5["customer_state"]]
     hover = [[format_persen(p), format_angka(t), format_angka(n)]
              for p, t, n in zip(top5["late_pct"], top5["late_count"], top5["order_count"])]
 
     fig = go.Figure(go.Bar(
-        x=top5["late_pct"], y=label_y, orientation="h",
-        marker=dict(color=warna["ungu"], line=dict(color=warna["biru"], width=tepi)),
+        x=top5["late_pct"], y=label_y, orientation="h", marker=dict(color=warna["ungu"]),
         text=[format_persen(p) for p in top5["late_pct"]], textposition="outside", cliponaxis=False,
         textfont=dict(color=warna["teks"], size=12), customdata=hover,
         hovertemplate="<b>%{y}</b><br>Terlambat: %{customdata[0]}<br>%{customdata[1]} dari %{customdata[2]} pesanan<extra></extra>",
@@ -414,7 +425,7 @@ def buat_grafik_top5(top5, rata_nasional, negara_terpilih, nama, warna):
                        text=f"Rata-rata nasional {format_persen(rata_nasional)}",
                        font=dict(color=warna["redup"], size=12))
 
-    batas = max(top5["late_pct"].max(), rata_nasional) * 1.25
+    batas = max(top5["late_pct"].max(), rata_nasional, 1) * 1.25
     tata_letak_dasar(fig, warna, tinggi=440)
     fig.update_layout(margin=dict(l=8, r=24, t=40, b=8), bargap=0.35)
     fig.update_xaxes(range=[0, batas], ticksuffix="%", title_text="Pesanan terlambat (%)")
@@ -423,21 +434,23 @@ def buat_grafik_top5(top5, rata_nasional, negara_terpilih, nama, warna):
 
 
 def buat_grafik_skor(skor_df, warna):
-    data = skor_df.dropna(subset=["skor_rata"])
-    warna_kelompok = dict(zip(URUTAN_KELOMPOK, [warna["biru"]] + warna["ungu_gradasi"]))
+    warna_kelompok = [warna["biru"]] + warna["ungu_gradasi"]
     teks = []
-    for baris in data.itertuples():
+    for baris in skor_df.itertuples():
+        if pd.isna(baris.skor_rata):
+            teks.append("<b>-</b>")  # kelompok tanpa ulasan
+            continue
         label = f"<b>{format_angka(baris.skor_rata, 2)}</b>"
         if baris.kelompok != "Tepat waktu" and pd.notna(baris.turun):
             label += f"<br>turun {format_angka(baris.turun, 2)} poin ({format_persen(baris.turun_persen, 1)})"
         teks.append(label)
-    label_x = [f"{k}<br>(n = {format_angka(n)})" for k, n in zip(data["kelompok"], data["jumlah_ulasan"])]
+    label_x = [f"{k}<br>(n = {format_angka(n)})" for k, n in zip(skor_df["kelompok"], skor_df["jumlah_ulasan"])]
+    hover = ["-" if pd.isna(s) else format_angka(s, 2) for s in skor_df["skor_rata"]]
 
     fig = go.Figure(go.Bar(
-        x=label_x, y=data["skor_rata"], marker=dict(color=[warna_kelompok[k] for k in data["kelompok"]]),
+        x=label_x, y=skor_df["skor_rata"].fillna(0), marker=dict(color=warna_kelompok),
         text=teks, textposition="outside", cliponaxis=False, textfont=dict(color=warna["teks"], size=12),
-        customdata=[[format_angka(s, 2), format_angka(n)] for s, n in zip(data["skor_rata"], data["jumlah_ulasan"])],
-        hovertemplate="<b>%{x}</b><br>Rata-rata skor: %{customdata[0]}<extra></extra>",
+        customdata=hover, hovertemplate="<b>%{x}</b><br>Rata-rata skor: %{customdata}<extra></extra>",
     ))
     tata_letak_dasar(fig, warna, tinggi=400)
     fig.update_layout(bargap=0.45)
@@ -446,13 +459,14 @@ def buat_grafik_skor(skor_df, warna):
     return fig
 
 
-def buat_grafik_segmen(segmen_df, segmen_terpilih, warna):
-    redup = [1 if segmen_terpilih in ("Semua", s) else 0.35 for s in segmen_df["segmen"]]
+def buat_grafik_segmen(segmen_df, warna):
+    # bila hanya satu segmen, lebar batang dibatasi agar tidak memenuhi grafik
+    lebar = 0.12 if len(segmen_df) == 1 else None
     fig = go.Figure()
     for kolom, judul, kode_warna in [("persen_pelanggan", "Porsi pelanggan", warna["biru"]),
                                      ("persen_pendapatan", "Porsi pendapatan", warna["ungu"])]:
         fig.add_trace(go.Bar(
-            name=judul, x=segmen_df["segmen"], y=segmen_df[kolom], marker=dict(color=kode_warna, opacity=redup),
+            name=judul, x=segmen_df["segmen"], y=segmen_df[kolom], marker=dict(color=kode_warna), width=lebar,
             text=[format_persen(v, 1) for v in segmen_df[kolom]], textposition="outside", cliponaxis=False,
             textfont=dict(color=warna["teks"], size=12),
             customdata=[format_persen(v) for v in segmen_df[kolom]],
@@ -476,14 +490,20 @@ def kotak_takarir(lead, penjelas, aksi=None):
     return f'<div class="takarir"><span class="lead">{lead}</span> {penjelas}{baris_aksi}</div>'
 
 
+def takarir_kosong():
+    return kotak_takarir("Tidak ada data.", PESAN_KOSONG)
+
+
 def buat_takarir_tren(tren):
     if tren.empty or tren["pendapatan"].sum() == 0:
-        return kotak_takarir("Tidak ada data.", "Tidak ada pendapatan pada kombinasi filter ini.")
+        return takarir_kosong()
     i = int(tren["pendapatan"].idxmax())
     puncak = tren["pendapatan"][i]
     lead = f"Puncak pada {label_bulan(tren['bulan'][i], panjang=True)}: {format_rp(puncak)}."
-    if i == 0 or tren["pendapatan"][i - 1] == 0:
-        penjelas = "Tidak ada bulan sebelumnya pada filter ini sebagai pembanding."
+    if i == 0:
+        penjelas = "Puncak berada di bulan pertama rentang, sehingga pembanding bulan sebelumnya tidak tersedia."
+    elif tren["pendapatan"][i - 1] == 0:
+        penjelas = "Bulan sebelumnya tidak memiliki penjualan, sehingga pertumbuhan tidak dapat dihitung."
     else:
         tumbuh = (puncak / tren["pendapatan"][i - 1] - 1) * 100
         arah = "Naik" if tumbuh >= 0 else "Turun"
@@ -492,29 +512,38 @@ def buat_takarir_tren(tren):
 
 
 def buat_takarir_kategori(kategori_df, kategori_terpilih):
-    if kategori_df.empty:
-        return kotak_takarir("Tidak ada data.", "Tidak ada pendapatan pada kombinasi filter ini.")
-    top3 = kategori_df.head(3)
-    lead = f"Tiga kategori teratas ({html.escape(', '.join(top3['kategori']))})"
-    penjelas = f"menyumbang {format_persen(top3['persen'].sum(), 1)} dari pendapatan pada filter ini."
+    if kategori_df.empty or kategori_df["pendapatan"].sum() == 0:
+        return takarir_kosong()
+    aksi = "Aksi: prioritaskan stok dan promosi untuk kategori ini."
 
+    if kategori_terpilih not in ("Semua", "Lainnya"):
+        baris = kategori_df.iloc[0]
+        lead = f"Kategori {html.escape(baris['kategori'])}"
+        penjelas = (f"menyumbang {format_persen(baris['persen'], 1)} ({format_rp(baris['pendapatan'])}) dari pendapatan "
+                    f"pada periode dan segmen terpilih.")
+        return kotak_takarir(lead, penjelas, aksi)
+
+    teratas = kategori_df.head(3)
+    nama = html.escape(", ".join(teratas["kategori"]))
+    jumlah = ANGKA_KATA.get(len(teratas), str(len(teratas)))
     if kategori_terpilih == "Lainnya":
-        persen = kategori_df[~kategori_df["kategori"].isin(kategori_teratas())]["persen"].sum()
-        penjelas += f" Kategori Lainnya (di luar 10 kategori teratas) menyumbang {format_persen(persen, 1)}."
-    elif kategori_terpilih != "Semua":
-        baris = kategori_df[kategori_df["kategori"] == kategori_terpilih]
-        if baris.empty:
-            penjelas += f" Kategori {html.escape(kategori_terpilih)} tidak memiliki penjualan pada filter ini."
-        else:
-            penjelas += (f" Kategori {html.escape(kategori_terpilih)} menyumbang "
-                         f"{format_persen(baris['persen'].iloc[0], 1)} ({format_rp(baris['pendapatan'].iloc[0])}).")
-    return kotak_takarir(lead, penjelas, "Aksi: prioritaskan stok dan promosi untuk kategori ini.")
+        lead = f"Kategori di luar 10 teratas menyumbang {format_persen(kategori_df['persen'].sum(), 1)}"
+        penjelas = (f"dari pendapatan pada periode dan segmen terpilih. {jumlah} terbesar di kelompok ini: {nama}, "
+                    f"dengan {format_persen(teratas['persen'].sum(), 1)}.")
+    else:
+        lead = f"{jumlah} kategori teratas ({nama})"
+        penjelas = f"menyumbang {format_persen(teratas['persen'].sum(), 1)} dari pendapatan pada filter ini."
+    return kotak_takarir(lead, penjelas, aksi)
 
 
 def buat_takarir_peta(negara_df, rata_nasional, nama):
+    if negara_df.empty:
+        return takarir_kosong()
     layak = negara_df[negara_df["order_count"] >= MIN_PESANAN]
     if layak.empty:
-        return kotak_takarir("Tidak ada data.", f"Belum ada negara bagian dengan minimal {MIN_PESANAN} pesanan pada periode ini.")
+        return kotak_takarir("Data belum cukup.",
+                             f"Belum ada negara bagian dengan minimal {MIN_PESANAN} pesanan pada filter ini. "
+                             f"Rata-rata seluruh pesanan terfilter {format_persen(rata_nasional)}.")
     teratas = layak.sort_values(by="late_pct", ascending=False).iloc[0]
     kode = teratas["customer_state"]
     lead = f"{kode} ({html.escape(nama.get(kode, kode))}) paling sering terlambat: {format_persen(teratas['late_pct'])}."
@@ -524,19 +553,23 @@ def buat_takarir_peta(negara_df, rata_nasional, nama):
 
 
 def buat_takarir_top5(top5, rata_nasional):
+    if rata_nasional is None:
+        return takarir_kosong()
     if top5.empty:
-        return kotak_takarir("Tidak ada data.", f"Belum ada negara bagian dengan minimal {MIN_PESANAN} pesanan pada periode ini.")
+        return kotak_takarir("Data belum cukup.",
+                             f"Belum ada negara bagian dengan minimal {MIN_PESANAN} pesanan pada filter ini.")
     kode = top5["customer_state"].tolist()
-    daftar = ", ".join(kode[:-1]) + (f", dan {kode[-1]}" if len(kode) > 1 else kode[-1])
     selisih = top5["late_pct"] - rata_nasional
 
     def bertanda(nilai):
         return ("+" if nilai >= 0 else "-") + format_angka(abs(nilai), 2)
 
-    lead = f"{len(kode)} negara bagian teratas: {daftar}."
+    lead = f"{ANGKA_KATA[len(kode)]} negara bagian teratas: {gabung_daftar(kode)}."
     penjelas = (f"Persentase terlambatnya {format_persen(top5['late_pct'].min())} sampai "
                 f"{format_persen(top5['late_pct'].max())}, atau {bertanda(selisih.min())} sampai "
                 f"{bertanda(selisih.max())} poin persen dibanding rata-rata nasional ({format_persen(rata_nasional)}).")
+    if len(kode) < 5:
+        penjelas += f" Hanya {len(kode)} negara bagian yang memiliki minimal {MIN_PESANAN} pesanan pada filter ini."
     aksi = "Aksi: dahulukan evaluasi rute dan mitra pengiriman, atau sesuaikan estimasi tiba, di negara bagian ini."
     return kotak_takarir(lead, penjelas, aksi)
 
@@ -544,6 +577,8 @@ def buat_takarir_top5(top5, rata_nasional):
 def buat_takarir_skor(skor_df):
     data = skor_df.set_index("kelompok")
     tepat, lambat = data.loc["Tepat waktu"], data.loc["Terlambat > 7 hari"]
+    if data["skor_rata"].isna().all():
+        return takarir_kosong()
     if pd.isna(tepat["skor_rata"]) or pd.isna(lambat["skor_rata"]):
         return kotak_takarir("Data ulasan tidak cukup.",
                              "Kelompok tepat waktu atau terlambat lebih dari 7 hari tidak memiliki ulasan pada filter ini.")
@@ -558,28 +593,35 @@ def buat_takarir_skor(skor_df):
     return kotak_takarir(lead, penjelas, aksi)
 
 
+def rata_belanja(segmen_df):
+    pelanggan = segmen_df["jumlah_pelanggan"].sum()
+    return segmen_df["pendapatan"].sum() / pelanggan if pelanggan else None
+
+
 def buat_takarir_rfm(segmen_df, segmen_terpilih):
     if segmen_df["jumlah_pelanggan"].sum() == 0:
-        return kotak_takarir("Tidak ada data.", "Tidak ada pelanggan pada kombinasi filter ini.")
+        return takarir_kosong()
+    aksi = ("Aksi: pertahankan segmen Aktif dengan program loyalitas dan aktifkan kembali segmen Pasif "
+            "lewat kampanye win-back.")
+
+    if segmen_terpilih != "Semua":
+        baris = segmen_df.iloc[0]
+        lead = (f"Segmen {segmen_terpilih}: {format_persen(baris['persen_pelanggan'], 1)} pelanggan, "
+                f"{format_persen(baris['persen_pendapatan'], 1)} pendapatan.")
+        penjelas = (f"Sebanyak {format_angka(baris['jumlah_pelanggan'])} pelanggan dengan rata-rata belanja "
+                    f"{format_rp(rata_belanja(segmen_df))} per pelanggan pada periode dan kategori terpilih.")
+        return kotak_takarir(lead, penjelas, aksi)
+
     tinggi = segmen_df[segmen_df["segmen"].str.contains("Tinggi")]
     rendah = segmen_df[segmen_df["segmen"].str.contains("Rendah")]
     lead = (f"Segmen Bernilai Tinggi: {format_persen(tinggi['persen_pelanggan'].sum(), 1)} pelanggan, "
             f"{format_persen(tinggi['persen_pendapatan'].sum(), 1)} pendapatan.")
-
-    if tinggi["jumlah_pelanggan"].sum() and rendah["jumlah_pelanggan"].sum():
-        rata_tinggi = tinggi["pendapatan"].sum() / tinggi["jumlah_pelanggan"].sum()
-        rata_rendah = rendah["pendapatan"].sum() / rendah["jumlah_pelanggan"].sum()
+    rata_tinggi, rata_rendah = rata_belanja(tinggi), rata_belanja(rendah)
+    if rata_tinggi is not None and rata_rendah is not None:
         penjelas = (f"Rata-rata belanja pelanggan Bernilai Tinggi ({format_rp(rata_tinggi)}) jauh di atas "
                     f"Bernilai Rendah ({format_rp(rata_rendah)}).")
     else:
         penjelas = "Salah satu kelompok segmen tidak memiliki pelanggan pada filter ini."
-
-    if segmen_terpilih != "Semua":
-        baris = segmen_df[segmen_df["segmen"] == segmen_terpilih].iloc[0]
-        penjelas += (f" Segmen {segmen_terpilih} yang dipilih: {format_angka(baris['jumlah_pelanggan'])} pelanggan "
-                     f"({format_persen(baris['persen_pelanggan'], 1)}) dengan {format_persen(baris['persen_pendapatan'], 1)} pendapatan.")
-    aksi = ("Aksi: pertahankan segmen Aktif dengan program loyalitas dan aktifkan kembali segmen Pasif "
-            "lewat kampanye win-back.")
     return kotak_takarir(lead, penjelas, aksi)
 
 
@@ -590,6 +632,9 @@ def buat_css(w):
     return f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
+/* warna latar juga diatur di sini, agar tetap sama walau dijalankan dari folder lain (tanpa config.toml) */
+.stApp {{ background: {w["latar"]}; }}
+[data-testid="stSidebar"] {{ background: {w["kartu"]}; }}
 [data-testid="stMainBlockContainer"] {{ padding: 3.5rem 2.5rem 3rem; max-width: 1500px; }}
 .olist, .kpi, .takarir, .chip, .judul-kartu {{ font-family: {FONT}; }}
 
@@ -613,6 +658,7 @@ def buat_css(w):
 .kpi .judul {{ color: {w["redup"]}; font-size: .8rem; font-weight: 600; line-height: 1.3; min-height: 2.6em; }}
 .kpi .nilai {{ color: {w["teks"]}; font-size: 1.45rem; font-weight: 700; margin: 6px 0 2px;
                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+@media (max-width: 1400px) {{ .kpi .nilai {{ font-size: 1.25rem; }} .kpi {{ padding: 14px 13px 12px; }} }}
 .kpi .nilai.ungu {{ color: {w["ungu"]}; }}
 .kpi .sub {{ color: {w["redup"]}; font-size: .78rem; overflow-wrap: anywhere; }}
 
@@ -666,12 +712,9 @@ IKON_LOGO = """<svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-
 <rect x="16" y="3" width="4" height="17" rx="1" fill="white"/></svg>"""
 
 
-# ---------------------------------------------------------------------------
-# Session state dan callback filter
-# ---------------------------------------------------------------------------
 def nilai_default():
-    bulan = daftar_bulan()
-    return {"dari": bulan[0], "sampai": bulan[-1], "negara": "Semua", "kategori": "Semua", "segmen": "Semua"}
+    bulan = daftar_bulan(muat_data())
+    return {"dari": bulan[0], "sampai": bulan[-1], "kategori": "Semua", "segmen": "Semua"}
 
 
 def siapkan_session_state():
@@ -691,14 +734,6 @@ def cek_urutan_periode():
         st.session_state.periode_ditukar = True
 
 
-def saat_peta_diklik():
-    """Klik pada peta mengatur filter negara bagian."""
-    pilihan = st.session_state[st.session_state.kunci_peta]["selection"]
-    lokasi = [titik.get("location") for titik in pilihan["points"] if titik.get("location")]
-    if lokasi:
-        st.session_state.negara = lokasi[0]
-
-
 def pilih_segmen(nama):
     """Klik kartu segmen memilih segmen itu; klik lagi untuk membatalkan."""
     st.session_state.segmen = "Semua" if st.session_state.segmen == nama else nama
@@ -707,7 +742,8 @@ def pilih_segmen(nama):
 # ---------------------------------------------------------------------------
 # Tampilan
 # ---------------------------------------------------------------------------
-def tampilkan_sidebar(nama):
+def tampilkan_sidebar():
+    data = muat_data()
     sb = st.sidebar
     sb.markdown(f'<div class="logo olist"><div class="ikon">{IKON_LOGO}</div><div><div class="nama">Olist Insights</div>'
                 f'<div class="sub">Analisis pesanan terkirim</div></div></div>', unsafe_allow_html=True)
@@ -715,25 +751,21 @@ def tampilkan_sidebar(nama):
 
     sb.markdown('<div class="label-periode olist">Periode pembelian</div>', unsafe_allow_html=True)
     kiri, kanan = sb.columns(2)
-    kiri.selectbox("Dari", daftar_bulan(), key="dari", format_func=label_bulan, on_change=cek_urutan_periode)
-    kanan.selectbox("Sampai", daftar_bulan(), key="sampai", format_func=label_bulan, on_change=cek_urutan_periode)
+    kiri.selectbox("Dari", daftar_bulan(data), key="dari", format_func=label_bulan, on_change=cek_urutan_periode)
+    kanan.selectbox("Sampai", daftar_bulan(data), key="sampai", format_func=label_bulan, on_change=cek_urutan_periode)
     if st.session_state.pop("periode_ditukar", False):
         sb.warning("Bulan \"Dari\" lebih besar dari \"Sampai\", jadi keduanya ditukar otomatis.")
 
-    daftar_negara = sorted(muat_data()["customer_state"].astype(str).unique())
-    sb.selectbox("Negara bagian pelanggan", ["Semua"] + daftar_negara, key="negara",
-                 format_func=lambda k: k if k == "Semua" or k not in nama else f"{k} · {nama[k]}")
-    sb.selectbox("Kategori produk", ["Semua"] + kategori_teratas() + ["Lainnya"], key="kategori")
+    sb.selectbox("Kategori produk", ["Semua"] + kategori_teratas(data) + ["Lainnya"], key="kategori")
     sb.selectbox("Segmen pelanggan (RFM)", ["Semua"] + URUTAN_SEGMEN, key="segmen")
     sb.button("Reset semua filter", key="tombol_reset", on_click=reset_filter, width="stretch")
 
 
-def tampilkan_chip(f, nama):
+def tampilkan_chip(f):
+    bulan = daftar_bulan(muat_data())
     chip = []
-    if (f["dari"], f["sampai"]) != (daftar_bulan()[0], daftar_bulan()[-1]):
+    if (f["dari"], f["sampai"]) != (bulan[0], bulan[-1]):
         chip.append(f"Periode: {label_bulan(f['dari'])} sampai {label_bulan(f['sampai'])}")
-    if f["negara"] != "Semua":
-        chip.append(f"Negara bagian: {f['negara']} · {nama.get(f['negara'], f['negara'])}")
     if f["kategori"] != "Semua":
         chip.append(f"Kategori: {f['kategori']}")
     if f["segmen"] != "Semua":
@@ -778,32 +810,34 @@ def takarir(isi_html):
     st.markdown(isi_html, unsafe_allow_html=True)
 
 
-def tampilkan_tab_pendapatan(f, warna):
+def tampilkan_grafik(fig, kunci):
+    st.plotly_chart(fig, width="stretch", theme=None, config=KONFIG_GRAFIK, key=kunci)
+
+
+def tampilkan_tab_pendapatan(hasil, f, warna):
     kiri, kanan = st.columns([1.1, 1], gap="medium")
 
     with kiri.container(key="kartu_tren"):
         judul_kartu("Tren Pendapatan Bulanan")
-        tren = hitung_tren(f["dari"], f["sampai"], f["negara"], f["kategori"])
+        tren = hasil["tren"]
         if tren["pendapatan"].sum() == 0:
             st.info(PESAN_KOSONG)
         else:
-            st.plotly_chart(buat_grafik_tren(tren, warna), width="stretch", theme=None,
-                            config=KONFIG_GRAFIK, key="grafik_tren")
+            tampilkan_grafik(buat_grafik_tren(tren, warna), "grafik_tren")
         takarir(buat_takarir_tren(tren))
 
     with kanan.container(key="kartu_kategori"):
         judul_kartu("Pendapatan per Kategori Produk")
-        kategori_df = hitung_kategori(f["dari"], f["sampai"], f["negara"])
+        kategori_df = hasil["kategori"]
         if kategori_df.empty:
             st.info(PESAN_KOSONG)
         else:
-            st.plotly_chart(buat_grafik_kategori(kategori_df, f["kategori"], warna), width="stretch",
-                            theme=None, config=KONFIG_GRAFIK, key="grafik_kategori")
+            tampilkan_grafik(buat_grafik_kategori(kategori_df, warna), "grafik_kategori")
         takarir(buat_takarir_kategori(kategori_df, f["kategori"]))
 
 
-def tampilkan_tab_pengiriman(f, peta, nama, warna):
-    negara_df, rata_nasional = hitung_keterlambatan_negara(f["dari"], f["sampai"])
+def tampilkan_tab_pengiriman(hasil, peta, nama, warna):
+    negara_df, rata_nasional, top5 = hasil["negara"], hasil["rata_nasional"], hasil["top5"]
     kiri, kanan = st.columns([1.15, 1], gap="medium")
 
     with kiri.container(key="kartu_peta"):
@@ -813,37 +847,30 @@ def tampilkan_tab_pengiriman(f, peta, nama, warna):
         elif negara_df.empty:
             st.info(PESAN_KOSONG)
         else:
-            # key berganti setiap negara bagian berubah, agar pilihan lama di peta tidak menempel
-            st.session_state.kunci_peta = f"peta_{f['negara']}"
-            st.plotly_chart(buat_grafik_peta(peta, negara_df, f["negara"], nama, warna), width="stretch",
-                            theme=None, config=KONFIG_GRAFIK, key=st.session_state.kunci_peta,
-                            on_select=saat_peta_diklik, selection_mode="points")
+            tampilkan_grafik(buat_grafik_peta(peta, negara_df, nama, warna), "grafik_peta")
         takarir(buat_takarir_peta(negara_df, rata_nasional, nama))
 
-    top5 = (negara_df[negara_df["order_count"] >= MIN_PESANAN]
-            .sort_values(by="late_pct", ascending=False).head(5))
     with kanan.container(key="kartu_top5"):
         judul_kartu("5 Negara Bagian Paling Terlambat")
         if top5.empty:
-            st.info(PESAN_KOSONG)
+            st.info(PESAN_KOSONG if negara_df.empty else
+                    f"Belum ada negara bagian dengan minimal {MIN_PESANAN} pesanan pada filter ini.")
         else:
-            st.plotly_chart(buat_grafik_top5(top5, rata_nasional, f["negara"], nama, warna), width="stretch",
-                            theme=None, config=KONFIG_GRAFIK, key="grafik_top5")
+            tampilkan_grafik(buat_grafik_top5(top5, rata_nasional, nama, warna), "grafik_top5")
         takarir(buat_takarir_top5(top5, rata_nasional))
 
     with st.container(key="kartu_skor"):
         judul_kartu("Penurunan Skor Ulasan pada Pesanan Terlambat")
-        skor_df = hitung_skor_ulasan(f["dari"], f["sampai"], f["negara"])
+        skor_df = hasil["skor"]
         if skor_df["skor_rata"].isna().all():
             st.info(PESAN_KOSONG)
         else:
-            st.plotly_chart(buat_grafik_skor(skor_df, warna), width="stretch", theme=None,
-                            config=KONFIG_GRAFIK, key="grafik_skor")
+            tampilkan_grafik(buat_grafik_skor(skor_df, warna), "grafik_skor")
         takarir(buat_takarir_skor(skor_df))
 
 
-def tampilkan_tab_pelanggan(f, warna):
-    segmen_df = hitung_segmen(f["negara"])
+def tampilkan_tab_pelanggan(hasil, f, warna):
+    segmen_df = hasil["rfm"]
 
     kolom = st.columns(4, gap="small")
     for i, baris in enumerate(segmen_df.itertuples()):
@@ -863,8 +890,7 @@ def tampilkan_tab_pelanggan(f, warna):
         if segmen_df["jumlah_pelanggan"].sum() == 0:
             st.info(PESAN_KOSONG)
         else:
-            st.plotly_chart(buat_grafik_segmen(segmen_df, f["segmen"], warna), width="stretch", theme=None,
-                            config=KONFIG_GRAFIK, key="grafik_segmen")
+            tampilkan_grafik(buat_grafik_segmen(segmen_df, warna), "grafik_segmen")
         takarir(buat_takarir_rfm(segmen_df, f["segmen"]))
 
 
@@ -876,27 +902,27 @@ def main():
     peta = muat_peta()
     nama = nama_negara_bagian(peta)
     siapkan_session_state()
-    tampilkan_sidebar(nama)
-    f = {k: st.session_state[k] for k in ["dari", "sampai", "negara", "kategori", "segmen"]}
+    tampilkan_sidebar()
+    f = {k: st.session_state[k] for k in ["dari", "sampai", "kategori", "segmen"]}
 
     st.markdown('<div class="olist"><h1 class="judul-halaman">Dashboard Analisis E-Commerce</h1>'
                 '<p class="subjudul-halaman">Pendapatan, pengiriman, kepuasan, dan segmen pelanggan dalam satu tampilan.</p></div>',
                 unsafe_allow_html=True)
-    tampilkan_chip(f, nama)
+    tampilkan_chip(f)
 
-    kpi = hitung_kpi(f["dari"], f["sampai"], f["negara"], f["kategori"])
-    tampilkan_kpi(kpi, f["kategori"])
-    if kpi["jumlah_pesanan"] == 0:
+    hasil = hitung_dashboard(f["dari"], f["sampai"], f["kategori"], f["segmen"])
+    tampilkan_kpi(hasil["kpi"], f["kategori"])
+    if hasil["kpi"]["jumlah_pesanan"] == 0:
         st.info(PESAN_KOSONG)
 
     tab_pendapatan, tab_pengiriman, tab_pelanggan = st.tabs(
         ["Pendapatan", "Pengiriman dan Ulasan", "Pelanggan (RFM)"], key="tab_aktif")
     with tab_pendapatan:
-        tampilkan_tab_pendapatan(f, warna)
+        tampilkan_tab_pendapatan(hasil, f, warna)
     with tab_pengiriman:
-        tampilkan_tab_pengiriman(f, peta, nama, warna)
+        tampilkan_tab_pengiriman(hasil, peta, nama, warna)
     with tab_pelanggan:
-        tampilkan_tab_pelanggan(f, warna)
+        tampilkan_tab_pelanggan(hasil, f, warna)
 
 
 if __name__ == "__main__":
